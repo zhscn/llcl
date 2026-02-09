@@ -2404,6 +2404,402 @@ public:
   void operator=(bool OptionWasSpecified);
 };
 
+class ShellCompletionPrinter {
+  // Helpers to sanitize identifiers for shell functions
+  static std::string sanitizeForShell(std::string_view Name) {
+    std::string Result;
+    Result.reserve(Name.size());
+    for (char C : Name) {
+      if (C == '-' || C == '.')
+        Result.push_back('_');
+      else if ((C >= 'a' && C <= 'z') || (C >= 'A' && C <= 'Z') ||
+               (C >= '0' && C <= '9') || C == '_')
+        Result.push_back(C);
+    }
+    return Result;
+  }
+
+  // Escape single quotes for shell strings
+  static std::string escapeForShell(std::string_view Str) {
+    std::string Result;
+    for (char C : Str) {
+      if (C == '\'') {
+        Result += "'\\''";
+      } else {
+        Result.push_back(C);
+      }
+    }
+    return Result;
+  }
+
+  // Escape special chars for zsh descriptions
+  static std::string escapeForZsh(std::string_view Str) {
+    std::string Result;
+    for (char C : Str) {
+      if (C == '[' || C == ']' || C == ':' || C == '\\' || C == '\'')
+        Result.push_back('\\');
+      Result.push_back(C);
+    }
+    return Result;
+  }
+
+  struct OptionInfo {
+    std::string Name;
+    std::string Description;
+    std::vector<std::string> Values;
+    bool IsPositional;
+  };
+
+  // Collect options for a given subcommand
+  static std::vector<OptionInfo> collectOptions(SubCommand &Sub) {
+    std::vector<OptionInfo> Result;
+    std::unordered_set<Option *> Seen;
+
+    for (auto &[Key, Opt] : Sub.OptionsMap) {
+      if (Opt->getOptionHiddenFlag() == ReallyHidden)
+        continue;
+      if (!Seen.insert(Opt).second)
+        continue;
+
+      OptionInfo Info;
+      Info.Name = std::string(Opt->ArgStr);
+      Info.Description = std::string(Opt->HelpStr);
+      Info.IsPositional = Opt->isPositional();
+
+      std::vector<std::string_view> CompValues;
+      Opt->getOptionCompletionValues(CompValues);
+      for (auto V : CompValues)
+        Info.Values.push_back(std::string(V));
+
+      Result.push_back(std::move(Info));
+    }
+
+    // Sort for deterministic output
+    std::sort(Result.begin(), Result.end(),
+              [](const OptionInfo &A, const OptionInfo &B) {
+                return A.Name < B.Name;
+              });
+    return Result;
+  }
+
+  // Collect named subcommands
+  static std::vector<std::pair<std::string, std::string>> collectSubCommands() {
+    std::vector<std::pair<std::string, std::string>> Result;
+    for (auto *S : GlobalParser().RegisteredSubCommands) {
+      if (S->getName().empty())
+        continue;
+      Result.emplace_back(std::string(S->getName()),
+                          std::string(S->getDescription()));
+    }
+    std::sort(Result.begin(), Result.end());
+    return Result;
+  }
+
+public:
+  void operator=(const std::string &Value) {
+    if (Value.empty())
+      return;
+
+    if (Value == "bash")
+      printBashCompletion();
+    else if (Value == "zsh")
+      printZshCompletion();
+    else {
+      llcl::errs() << "Unsupported shell: " << Value
+                   << ". Supported: bash, zsh\n";
+      exit(1);
+    }
+    exit(0);
+  }
+
+  void printBashCompletion() {
+    auto &OS = llcl::outs();
+    std::string ProgName = GlobalParser().ProgramName;
+    std::string FuncName = "_" + sanitizeForShell(ProgName) + "_completion";
+
+    auto SubCmds = collectSubCommands();
+    bool HasSubCmds = !SubCmds.empty();
+
+    OS << "# bash completion for " << ProgName << "\n";
+    OS << FuncName << "() {\n";
+    OS << "    local cur prev words cword\n";
+    OS << "    if type _init_completion &>/dev/null; then\n";
+    OS << "        _init_completion || return\n";
+    OS << "    else\n";
+    OS << "        cur=\"${COMP_WORDS[COMP_CWORD]}\"\n";
+    OS << "        prev=\"${COMP_WORDS[COMP_CWORD-1]}\"\n";
+    OS << "        words=(\"${COMP_WORDS[@]}\")\n";
+    OS << "        cword=$COMP_CWORD\n";
+    OS << "    fi\n\n";
+
+    if (HasSubCmds) {
+      // Build subcommand detection
+      OS << "    local subcmd=\"\"\n";
+      OS << "    for ((i=1; i < cword; i++)); do\n";
+      OS << "        case \"${words[i]}\" in\n";
+      OS << "            ";
+      for (size_t i = 0; i < SubCmds.size(); ++i) {
+        if (i > 0)
+          OS << "|";
+        OS << SubCmds[i].first;
+      }
+      OS << ") subcmd=\"${words[i]}\"; break ;;\n";
+      OS << "        esac\n";
+      OS << "    done\n\n";
+    }
+
+    // Build value completion for prev option
+    auto printValueCase = [&](const std::vector<OptionInfo> &Opts) {
+      bool HasValueOpts = false;
+      for (auto &Opt : Opts) {
+        if (!Opt.Values.empty() && !Opt.IsPositional) {
+          HasValueOpts = true;
+          break;
+        }
+      }
+      if (!HasValueOpts)
+        return;
+
+      OS << "    case \"$prev\" in\n";
+      for (auto &Opt : Opts) {
+        if (Opt.Values.empty() || Opt.IsPositional)
+          continue;
+        std::string Prefix = Opt.Name.size() == 1 ? "-" : "--";
+        OS << "        " << Prefix << Opt.Name << ")\n";
+        OS << "            COMPREPLY=($(compgen -W '";
+        for (size_t i = 0; i < Opt.Values.size(); ++i) {
+          if (i > 0)
+            OS << " ";
+          OS << Opt.Values[i];
+        }
+        OS << "' -- \"$cur\")); return ;;\n";
+      }
+      OS << "    esac\n\n";
+    };
+
+    auto printOptsBlock = [&](const std::vector<OptionInfo> &Opts,
+                              bool IncludeSubCmds) {
+      OS << "    local opts=\"";
+      bool First = true;
+      for (auto &Opt : Opts) {
+        if (Opt.IsPositional)
+          continue;
+        if (!First)
+          OS << " ";
+        First = false;
+        OS << (Opt.Name.size() == 1 ? "-" : "--") << Opt.Name;
+      }
+      if (IncludeSubCmds) {
+        for (auto &SC : SubCmds) {
+          if (!First)
+            OS << " ";
+          First = false;
+          OS << SC.first;
+        }
+      }
+      OS << "\"\n";
+      OS << "    COMPREPLY=($(compgen -W \"$opts\" -- \"$cur\"))\n";
+    };
+
+    if (HasSubCmds) {
+      // Per-subcommand completion
+      OS << "    case \"$subcmd\" in\n";
+      for (auto &SC : SubCmds) {
+        // Find the SubCommand* to collect its options
+        SubCommand *SCPtr = nullptr;
+        for (auto *S : GlobalParser().RegisteredSubCommands) {
+          if (S->getName() == SC.first) {
+            SCPtr = S;
+            break;
+          }
+        }
+        if (!SCPtr)
+          continue;
+
+        auto Opts = collectOptions(*SCPtr);
+        OS << "        " << SC.first << ")\n";
+        // Print value completion for this subcommand
+        bool HasValueOpts = false;
+        for (auto &Opt : Opts) {
+          if (!Opt.Values.empty() && !Opt.IsPositional) {
+            HasValueOpts = true;
+            break;
+          }
+        }
+        if (HasValueOpts) {
+          OS << "            case \"$prev\" in\n";
+          for (auto &Opt : Opts) {
+            if (Opt.Values.empty() || Opt.IsPositional)
+              continue;
+            std::string Prefix = Opt.Name.size() == 1 ? "-" : "--";
+            OS << "                " << Prefix << Opt.Name << ")\n";
+            OS << "                    COMPREPLY=($(compgen -W '";
+            for (size_t i = 0; i < Opt.Values.size(); ++i) {
+              if (i > 0)
+                OS << " ";
+              OS << Opt.Values[i];
+            }
+            OS << "' -- \"$cur\")); return ;;\n";
+          }
+          OS << "            esac\n";
+        }
+        OS << "            opts=\"";
+        bool First = true;
+        for (auto &Opt : Opts) {
+          if (Opt.IsPositional)
+            continue;
+          if (!First)
+            OS << " ";
+          First = false;
+          OS << (Opt.Name.size() == 1 ? "-" : "--") << Opt.Name;
+        }
+        OS << "\"\n";
+        OS << "            COMPREPLY=($(compgen -W \"$opts\" -- \"$cur\"))\n";
+        OS << "            return ;;\n";
+      }
+      OS << "    esac\n\n";
+
+      // Top-level options
+      auto TopOpts = collectOptions(SubCommand::getTopLevel());
+      printValueCase(TopOpts);
+      printOptsBlock(TopOpts, /*IncludeSubCmds=*/true);
+    } else {
+      auto TopOpts = collectOptions(SubCommand::getTopLevel());
+      printValueCase(TopOpts);
+      printOptsBlock(TopOpts, /*IncludeSubCmds=*/false);
+    }
+
+    OS << "}\n";
+    OS << "complete -F " << FuncName << " " << ProgName << "\n";
+  }
+
+  void printZshCompletion() {
+    auto &OS = llcl::outs();
+    std::string ProgName = GlobalParser().ProgramName;
+    std::string SafeName = sanitizeForShell(ProgName);
+
+    auto SubCmds = collectSubCommands();
+    bool HasSubCmds = !SubCmds.empty();
+
+    OS << "#compdef " << ProgName << "\n\n";
+
+    if (HasSubCmds) {
+      // Main function dispatches to subcommands
+      OS << "_" << SafeName << "() {\n";
+      OS << "    local -a _subcommands\n";
+      OS << "    _subcommands=(\n";
+      for (auto &SC : SubCmds) {
+        OS << "        '" << SC.first << ":" << escapeForZsh(SC.second)
+           << "'\n";
+      }
+      OS << "    )\n\n";
+
+      // Top-level options
+      auto TopOpts = collectOptions(SubCommand::getTopLevel());
+      OS << "    _arguments -C \\\n";
+      for (auto &Opt : TopOpts) {
+        if (Opt.IsPositional)
+          continue;
+        std::string Prefix = Opt.Name.size() == 1 ? "-" : "--";
+        OS << "        '" << Prefix << Opt.Name;
+        if (!Opt.Description.empty())
+          OS << "[" << escapeForZsh(Opt.Description) << "]";
+        if (!Opt.Values.empty()) {
+          OS << ": :(";
+          for (size_t i = 0; i < Opt.Values.size(); ++i) {
+            if (i > 0)
+              OS << " ";
+            OS << Opt.Values[i];
+          }
+          OS << ")";
+        }
+        OS << "' \\\n";
+      }
+      OS << "        '1:subcommand:->subcmd' \\\n";
+      OS << "        '*::arg:->args'\n\n";
+
+      OS << "    case $state in\n";
+      OS << "        subcmd)\n";
+      OS << "            _describe 'subcommand' _subcommands\n";
+      OS << "            ;;\n";
+      OS << "        args)\n";
+      OS << "            case $words[1] in\n";
+      for (auto &SC : SubCmds) {
+        OS << "                " << SC.first << ") _" << SafeName << "_"
+           << sanitizeForShell(SC.first) << " ;;\n";
+      }
+      OS << "            esac\n";
+      OS << "            ;;\n";
+      OS << "    esac\n";
+      OS << "}\n\n";
+
+      // Per-subcommand functions
+      for (auto &SC : SubCmds) {
+        SubCommand *SCPtr = nullptr;
+        for (auto *S : GlobalParser().RegisteredSubCommands) {
+          if (S->getName() == SC.first) {
+            SCPtr = S;
+            break;
+          }
+        }
+        if (!SCPtr)
+          continue;
+
+        auto Opts = collectOptions(*SCPtr);
+        OS << "_" << SafeName << "_" << sanitizeForShell(SC.first) << "() {\n";
+        OS << "    _arguments \\\n";
+        for (auto &Opt : Opts) {
+          if (Opt.IsPositional)
+            continue;
+          std::string Prefix = Opt.Name.size() == 1 ? "-" : "--";
+          OS << "        '" << Prefix << Opt.Name;
+          if (!Opt.Description.empty())
+            OS << "[" << escapeForZsh(Opt.Description) << "]";
+          if (!Opt.Values.empty()) {
+            OS << ": :(";
+            for (size_t i = 0; i < Opt.Values.size(); ++i) {
+              if (i > 0)
+                OS << " ";
+              OS << Opt.Values[i];
+            }
+            OS << ")";
+          }
+          OS << "' \\\n";
+        }
+        OS << "        '*:file:_files'\n";
+        OS << "}\n\n";
+      }
+    } else {
+      // No subcommands - simple _arguments
+      auto TopOpts = collectOptions(SubCommand::getTopLevel());
+      OS << "_" << SafeName << "() {\n";
+      OS << "    _arguments \\\n";
+      for (auto &Opt : TopOpts) {
+        if (Opt.IsPositional)
+          continue;
+        std::string Prefix = Opt.Name.size() == 1 ? "-" : "--";
+        OS << "        '" << Prefix << Opt.Name;
+        if (!Opt.Description.empty())
+          OS << "[" << escapeForZsh(Opt.Description) << "]";
+        if (!Opt.Values.empty()) {
+          OS << ": :(";
+          for (size_t i = 0; i < Opt.Values.size(); ++i) {
+            if (i > 0)
+              OS << " ";
+            OS << Opt.Values[i];
+          }
+          OS << ")";
+        }
+        OS << "' \\\n";
+      }
+      OS << "        '*:file:_files'\n";
+      OS << "}\n\n";
+    }
+
+    OS << "_" << SafeName << "\n";
+  }
+};
+
 struct CommandLineCommonOptions {
   HelpPrinter UncategorizedNormalPrinter{false};
   HelpPrinter UncategorizedHiddenPrinter{true};
@@ -2467,6 +2863,17 @@ struct CommandLineCommonOptions {
       llcl::desc("Print all option values after command line parsing"),
       llcl::Hidden,
       llcl::init(false),
+      llcl::cat(GenericCategory),
+      llcl::sub(SubCommand::getAll())};
+
+  ShellCompletionPrinter CompletionPrinter;
+
+  llcl::opt<ShellCompletionPrinter, true, parser<std::string>> CompletionOp{
+      "generate-completion",
+      llcl::desc("Generate shell completion script (bash or zsh)"),
+      llcl::location(CompletionPrinter),
+      llcl::ValueRequired,
+      llcl::Hidden,
       llcl::cat(GenericCategory),
       llcl::sub(SubCommand::getAll())};
 
@@ -2553,6 +2960,14 @@ void llcl::PrintHelpMessage(bool Hidden, bool Categorized) {
 void llcl::PrintVersionMessage() {
   CommonOptions().VersionPrinterInstance.print(
       CommonOptions().ExtraVersionPrinters);
+}
+
+void llcl::PrintShellCompletion(std::string_view Shell) {
+  initCommonOptions();
+  if (Shell == "bash")
+    CommonOptions().CompletionPrinter.printBashCompletion();
+  else if (Shell == "zsh")
+    CommonOptions().CompletionPrinter.printZshCompletion();
 }
 
 void llcl::SetVersionPrinter(VersionPrinterTy func) {

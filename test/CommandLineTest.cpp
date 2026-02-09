@@ -1927,4 +1927,177 @@ TEST(CommandLineTest, HelpWithEmptyCategory) {
   ResetCommandLineParser();
 }
 
+//===----------------------------------------------------------------------===//
+// Shell Completion Generation tests
+//===----------------------------------------------------------------------===//
+
+TEST(CommandLineTest, BashCompletionBasic) {
+  ResetCommandLineParser();
+
+  StackOption<bool> OptVerbose("verbose", desc("Enable verbose output"));
+  StackOption<std::string> OptOutput("output", desc("Output file"));
+
+  const char *args[] = {"myprog"};
+  EXPECT_TRUE(ParseCommandLineOptions(std::size(args), args, "", &nulls()));
+
+  auto Output = interceptStdout([]() { PrintShellCompletion("bash"); });
+
+  // Should contain the function name based on program name
+  EXPECT_NE(std::string::npos, Output.find("_myprog_completion()")) << Output;
+  // Should contain complete command
+  EXPECT_NE(std::string::npos,
+            Output.find("complete -F _myprog_completion myprog"))
+      << Output;
+  // Should contain our options
+  EXPECT_NE(std::string::npos, Output.find("--verbose")) << Output;
+  EXPECT_NE(std::string::npos, Output.find("--output")) << Output;
+  // Should contain _init_completion
+  EXPECT_NE(std::string::npos, Output.find("_init_completion")) << Output;
+
+  ResetCommandLineParser();
+}
+
+TEST(CommandLineTest, BashCompletionWithEnumValues) {
+  ResetCommandLineParser();
+
+  enum Format { JSON, XML, YAML };
+  StackOption<Format> OptFormat(
+      "format", desc("Output format"),
+      values(clEnumValN(JSON, "json", "JSON format"),
+             clEnumValN(XML, "xml", "XML format"),
+             clEnumValN(YAML, "yaml", "YAML format")));
+
+  const char *args[] = {"myprog"};
+  EXPECT_TRUE(ParseCommandLineOptions(std::size(args), args, "", &nulls()));
+
+  auto Output = interceptStdout([]() { PrintShellCompletion("bash"); });
+
+  // Should have value completion for --format
+  EXPECT_NE(std::string::npos, Output.find("--format")) << Output;
+  EXPECT_NE(std::string::npos, Output.find("json")) << Output;
+  EXPECT_NE(std::string::npos, Output.find("xml")) << Output;
+  EXPECT_NE(std::string::npos, Output.find("yaml")) << Output;
+
+  ResetCommandLineParser();
+}
+
+TEST(CommandLineTest, BashCompletionWithSubcommands) {
+  ResetCommandLineParser();
+
+  StackSubCommand SC1("build", "Build the project");
+  StackSubCommand SC2("test", "Run tests");
+  StackOption<bool> SC1Opt("release", sub(SC1), desc("Release build"));
+  StackOption<bool> SC2Opt("verbose", sub(SC2), desc("Verbose test output"));
+
+  const char *args[] = {"myprog"};
+  EXPECT_TRUE(ParseCommandLineOptions(std::size(args), args, "", &nulls()));
+
+  auto Output = interceptStdout([]() { PrintShellCompletion("bash"); });
+
+  // Should contain subcommand names
+  EXPECT_NE(std::string::npos, Output.find("build")) << Output;
+  EXPECT_NE(std::string::npos, Output.find("test")) << Output;
+  // Should have per-subcommand case
+  EXPECT_NE(std::string::npos, Output.find("--release")) << Output;
+  EXPECT_NE(std::string::npos, Output.find("--verbose")) << Output;
+
+  ResetCommandLineParser();
+}
+
+TEST(CommandLineTest, ZshCompletionBasic) {
+  ResetCommandLineParser();
+
+  StackOption<bool> OptVerbose("verbose", desc("Enable verbose output"));
+  StackOption<std::string> OptOutput("output", desc("Output file"));
+
+  const char *args[] = {"myprog"};
+  EXPECT_TRUE(ParseCommandLineOptions(std::size(args), args, "", &nulls()));
+
+  auto Output = interceptStdout([]() { PrintShellCompletion("zsh"); });
+
+  // Should contain compdef
+  EXPECT_NE(std::string::npos, Output.find("#compdef myprog")) << Output;
+  // Should contain function
+  EXPECT_NE(std::string::npos, Output.find("_myprog()")) << Output;
+  // Should contain _arguments
+  EXPECT_NE(std::string::npos, Output.find("_arguments")) << Output;
+  // Should contain our options with descriptions
+  EXPECT_NE(std::string::npos, Output.find("--verbose")) << Output;
+  EXPECT_NE(std::string::npos, Output.find("--output")) << Output;
+
+  ResetCommandLineParser();
+}
+
+TEST(CommandLineTest, ZshCompletionWithEnumValues) {
+  ResetCommandLineParser();
+
+  enum Format { JSON, XML, YAML };
+  StackOption<Format> OptFormat(
+      "format", desc("Output format"),
+      values(clEnumValN(JSON, "json", "JSON format"),
+             clEnumValN(XML, "xml", "XML format"),
+             clEnumValN(YAML, "yaml", "YAML format")));
+
+  const char *args[] = {"myprog"};
+  EXPECT_TRUE(ParseCommandLineOptions(std::size(args), args, "", &nulls()));
+
+  auto Output = interceptStdout([]() { PrintShellCompletion("zsh"); });
+
+  // Should contain value list for enum option
+  EXPECT_NE(std::string::npos, Output.find("--format")) << Output;
+  EXPECT_NE(std::string::npos, Output.find("json")) << Output;
+  EXPECT_NE(std::string::npos, Output.find("xml")) << Output;
+  EXPECT_NE(std::string::npos, Output.find("yaml")) << Output;
+
+  ResetCommandLineParser();
+}
+
+TEST(CommandLineTest, ZshCompletionWithSubcommands) {
+  ResetCommandLineParser();
+
+  StackSubCommand SC1("build", "Build the project");
+  StackSubCommand SC2("test", "Run tests");
+  StackOption<bool> SC1Opt("release", sub(SC1), desc("Release build"));
+  StackOption<bool> SC2Opt("verbose", sub(SC2), desc("Verbose test output"));
+
+  const char *args[] = {"myprog"};
+  EXPECT_TRUE(ParseCommandLineOptions(std::size(args), args, "", &nulls()));
+
+  auto Output = interceptStdout([]() { PrintShellCompletion("zsh"); });
+
+  // Should contain subcommand descriptions
+  EXPECT_NE(std::string::npos, Output.find("build")) << Output;
+  EXPECT_NE(std::string::npos, Output.find("test")) << Output;
+  // Should contain per-subcommand functions
+  EXPECT_NE(std::string::npos, Output.find("_myprog_build()")) << Output;
+  EXPECT_NE(std::string::npos, Output.find("_myprog_test()")) << Output;
+  // Should contain subcommand-specific options
+  EXPECT_NE(std::string::npos, Output.find("--release")) << Output;
+  EXPECT_NE(std::string::npos, Output.find("--verbose")) << Output;
+
+  ResetCommandLineParser();
+}
+
+TEST(CommandLineTest, CompletionHidesReallyHiddenOptions) {
+  ResetCommandLineParser();
+
+  StackOption<bool> OptVisible("visible", desc("Visible option"));
+  StackOption<bool> OptHidden("hidden-opt", desc("Hidden option"), Hidden);
+  StackOption<bool> OptReallyHidden("really-hidden-opt",
+                                    desc("Really hidden option"), ReallyHidden);
+
+  const char *args[] = {"myprog"};
+  EXPECT_TRUE(ParseCommandLineOptions(std::size(args), args, "", &nulls()));
+
+  auto Output = interceptStdout([]() { PrintShellCompletion("bash"); });
+
+  // Visible and Hidden should be present
+  EXPECT_NE(std::string::npos, Output.find("--visible")) << Output;
+  EXPECT_NE(std::string::npos, Output.find("--hidden-opt")) << Output;
+  // ReallyHidden should NOT be present
+  EXPECT_EQ(std::string::npos, Output.find("--really-hidden-opt")) << Output;
+
+  ResetCommandLineParser();
+}
+
 } // anonymous namespace

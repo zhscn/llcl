@@ -412,6 +412,11 @@ public:
 
   virtual void getExtraOptionNames(std::vector<std::string_view> &) {}
 
+  /// Get possible values for this option (for shell completion).
+  /// For enum-style options, returns the valid value names.
+  virtual void
+  getOptionCompletionValues(std::vector<std::string_view> &) const {}
+
   // Wrapper around handleOccurrence that enforces Flags.
   //
   virtual bool addOccurrence(unsigned pos, std::string_view ArgName,
@@ -1406,6 +1411,14 @@ public:
 
   ParserClass &getParser() { return Parser; }
 
+  void getOptionCompletionValues(
+      std::vector<std::string_view> &Values) const override {
+    if constexpr (std::is_base_of_v<generic_parser_base, ParserClass>) {
+      for (unsigned i = 0, e = Parser.getNumOptions(); i != e; ++i)
+        Values.push_back(Parser.getOption(i));
+    }
+  }
+
   template <class T> DataType &operator=(const T &Val) {
     this->setValue(Val);
     if (Callback)
@@ -1619,6 +1632,14 @@ public:
 
   ParserClass &getParser() { return Parser; }
 
+  void getOptionCompletionValues(
+      std::vector<std::string_view> &Values) const override {
+    if constexpr (std::is_base_of_v<generic_parser_base, ParserClass>) {
+      for (unsigned i = 0, e = Parser.getNumOptions(); i != e; ++i)
+        Values.push_back(Parser.getOption(i));
+    }
+  }
+
   unsigned getPosition(unsigned optnum) const {
     assert(optnum < this->size() && "Invalid option index");
     return Positions[optnum];
@@ -1782,6 +1803,14 @@ public:
 
   ParserClass &getParser() { return Parser; }
 
+  void getOptionCompletionValues(
+      std::vector<std::string_view> &Values) const override {
+    if constexpr (std::is_base_of_v<generic_parser_base, ParserClass>) {
+      for (unsigned i = 0, e = Parser.getNumOptions(); i != e; ++i)
+        Values.push_back(Parser.getOption(i));
+    }
+  }
+
   unsigned getPosition(unsigned optnum) const {
     assert(optnum < this->size() && "Invalid option index");
     return Positions[optnum];
@@ -1882,6 +1911,10 @@ void PrintVersionMessage();
 
 /// This function just prints the help message.
 void PrintHelpMessage(bool Hidden = false, bool Categorized = false);
+
+/// Print shell completion script to stdout.
+/// Supported shells: "bash", "zsh".
+void PrintShellCompletion(std::string_view Shell);
 
 //===----------------------------------------------------------------------===//
 // Public interface for accessing registered options.
